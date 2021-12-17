@@ -52,22 +52,35 @@ local _M = {}
 local Doc = { __type = "doc" };
 Doc.__index = Doc;
 
+
+local function is_text(s) return type(s) == 'string' end
+
+
 --- create a new document node.
--- @param tag the tag name
--- @param attr optional attributes (table of name-value pairs)
+-- @tparam string tag the tag name
+-- @tparam[opt={}] table attr attributes (table of name-value pairs)
+-- @return the Node object
+-- @see xml.elem
+-- @usage
+-- local doc = xml.new("main", { hello = "world", answer = "42" })
+-- print(doc)  -->  <main hello='world' answer='42'/>
 function _M.new(tag, attr)
-    local doc = { tag = tag, attr = attr or {}, last_add = {}};
-    return setmetatable(doc, Doc);
+  if type(tag) ~= "string" then
+    error("expected 'tag' to be a string value, got: " .. type(tag), 2)
+  end
+  local doc = { tag = tag, attr = attr or {}, last_add = {}};
+  return setmetatable(doc, Doc);
 end
 
---- parse an XML document.  By default, this uses lxp.lom.parse, but
--- falls back to basic_parse, or if use_basic is true
--- @param text_or_file  file or string representation
+
+--- parse an XML document. By default, this uses lxp.lom.parse, but
+-- falls back to basic_parse, or if `use_basic` is truthy
+-- @param text_or_filename  file or string representation
 -- @param is_file whether text_or_file is a file name or not
 -- @param use_basic do a basic parse
 -- @return a parsed LOM document with the document metatatables set
 -- @return nil, error the error can either be a file error or a parse error
-function _M.parse(text_or_file, is_file, use_basic)
+function _M.parse(text_or_filename, is_file, use_basic)
     local parser,status,lom
     if use_basic then
         parser = _M.basic_parse
@@ -81,13 +94,14 @@ function _M.parse(text_or_file, is_file, use_basic)
     end
 
     if is_file then
-        local f,err = io.open(text_or_file)
+        -- TODO: replace with utils.readfile()
+        local f,err = io.open(text_or_filename)
         if not f then return nil,err end
-        text_or_file = f:read '*a'
+        text_or_filename = f:read '*a'
         f:close()
     end
 
-    local doc,err = parser(text_or_file)
+    local doc,err = parser(text_or_filename)
     if not doc then
         return nil,err
     end
@@ -100,262 +114,423 @@ function _M.parse(text_or_file, is_file, use_basic)
     return doc
 end
 
----- convenient function to add a document node, This updates the last inserted position.
--- @param tag a tag name
--- @param attrs optional set of attributes (name-string pairs)
-function Doc:addtag(tag, attrs)
-    local s = _M.new(tag, attrs);
-    (self.last_add[#self.last_add] or self):add_direct_child(s);
-    t_insert(self.last_add, s);
-    return self;
-end
 
---- convenient function to add a text node.  This updates the last inserted position.
--- @param text a string
-function Doc:text(text)
-    (self.last_add[#self.last_add] or self):add_direct_child(text);
-    return self;
-end
-
----- go up one level in a document
-function Doc:up()
-    t_remove(self.last_add);
-    return self;
-end
-
-function Doc:reset()
-    local last_add = self.last_add;
-    for i = 1,#last_add do
-        last_add[i] = nil;
+--- Create a Node with a set of children (text or Nodes) and attributes.
+-- @tparam string tag a tag name
+-- @tparam table|string items either a single child (text or Node), or a table where the hash
+-- part is the attributes and the list part is the children (text or Nodes).
+-- @return the new Node
+-- @see xml.new
+-- @see xml.tags
+-- @usage
+-- local doc = xml.elem("top", "hello world")                -- <top>hello world</top>
+-- local doc = xml.elem("main", xml.new("child"))            -- <main><child/></main>
+-- local doc = xml.elem("main", { "this ", "is ", "nice" })  -- <main>this is nice</main>
+-- local doc = xml.elem("main", { xml.new "this",
+--                                xml.new "is",
+--                                xml.new "nice" })          -- <main><this/><is/><nice/></main>
+-- local doc = xml.elem("main", { hello = "world" })         -- <main hello='world'/>
+-- local doc = xml.elem("main", {
+--   "prefix",
+--   xml.elem("child", { "this ", "is ", "nice"}),
+--   "postfix",
+--   attrib = "value"
+-- })   -- <main attrib='value'>prefix<child>this is nice</child>postfix</main>"
+function _M.elem(tag, items)
+  local s = _M.new(tag)
+  if is_text(items) then items = {items} end
+  if _M.is_tag(items) then
+    t_insert(s,items)
+  elseif type(items) == 'table' then
+    for k,v in pairs(items) do
+      if is_text(k) then
+        s.attr[k] = v
+        t_insert(s.attr,k)
+      else
+        s[k] = v
+      end
     end
-    return self;
+  end
+  return s
 end
 
---- append a child to a document directly.
+
+--- given a list of names, return a number of element constructors.
+-- If passing a comma-separated string, then whitespace surrounding the values
+-- will be stripped.
+--
+-- The returned constructor functions are a shortcut to `xml.elem` where you
+-- no longer provide the tag-name, but only the `items` table.
+-- @tparam string|table list a list of names, or a comma-separated string.
+-- @return (multiple) constructor functions; `function(items)`. For the `items`
+-- parameter see `xml.elem`.
+-- @see xml.elem
+-- @usage
+-- local new_parent, new_child = xml.tags 'mom, kid'
+-- doc = new_parent {new_child 'Bob', new_child 'Annie'}
+-- -- <mom><kid>Bob</kid><kid>Annie</kid></mom>
+function _M.tags(list)
+  local ctors = {}
+  if is_text(list) then
+    list = split(list:match("^%s*(.-)%s*$"),'%s*,%s*')
+  end
+  for i,tag in ipairs(list) do
+    local function ctor(items)
+      return _M.elem(tag,items)
+    end
+    ctors[i] = ctor
+  end
+  return unpack(ctors)
+end
+
+
+--- Adds a document Node, at current position.
+-- This updates the last inserted position to the new Node.
+-- @tparam string tag the tag name
+-- @tparam[opt={}] table attrs attributes (table of name-value pairs)
+-- @return the current node (`self`)
+-- @usage
+-- local doc = xml.new("main")
+-- doc:addtag("penlight", { hello = "world"})
+-- doc:addtag("expat")  -- added to 'penlight' since position moved
+-- print(doc)  -->  <main><penlight hello='world'><expat/></penlight></main>
+function Doc:addtag(tag, attrs)
+  local s = _M.new(tag, attrs)
+  self:add_child(s)
+  t_insert(self.last_add, s)
+  return self
+end
+
+
+--- Adds a text node, at current position.
+-- @tparam string text a string
+-- @return the current node (`self`)
+-- @usage
+-- local doc = xml.new("main")
+-- doc:text("penlight")
+-- doc:text("expat")
+-- print(doc)  -->  <main><penlightexpat</main>
+function Doc:text(text)
+  self:add_child(text)
+  return self
+end
+
+
+--- Moves current position up one level.
+-- @return the current node (`self`)
+function Doc:up()
+  t_remove(self.last_add)
+  return self
+end
+
+
+--- Resets current position to top level.
+-- Resets to the `self` node.
+-- @return the current node (`self`)
+function Doc:reset()
+  local last_add = self.last_add
+  for i = 1,#last_add do
+    last_add[i] = nil
+  end
+  return self
+end
+
+
+--- Append a child to the currrent Node (ignoring current position).
 -- @param child a child node (either text or a document)
+-- @return the current node (`self`)
+-- @usage
+-- local doc = xml.new("main")
+-- doc:add_direct_child("dog")
+-- doc:add_direct_child(xml.new("child"))
+-- doc:add_direct_child("cat")
+-- print(doc)  -->  <main>dog<child/>cat</main>
 function Doc:add_direct_child(child)
-    t_insert(self, child);
+  t_insert(self, child)
+  return self
 end
 
---- append a child to a document at the last element added
+
+--- Append a child at the current position (without changing position).
 -- @param child a child node (either text or a document)
+-- @return the current node (`self`)
+-- @usage
+-- local doc = xml.new("main")
+-- doc:addtag("one")
+-- doc:add_child(xml.new("item1"))
+-- doc:add_child(xml.new("item2"))
+-- doc:add_child(xml.new("item3"))
+-- print(doc)  -->  <main><one><item1/><item2/><item3/></one></main>
 function Doc:add_child(child)
-    (self.last_add[#self.last_add] or self):add_direct_child(child);
-    return self;
+  (self.last_add[#self.last_add] or self):add_direct_child(child)
+  return self
 end
+
 
 --accessing attributes: useful not to have to expose implementation (attr)
 --but also can allow attr to be nil in any future optimizations
 
---- set attributes of a document node.
--- @param t a table containing attribute/value pairs
-function Doc:set_attribs (t)
-    for k,v in pairs(t) do
-        self.attr[k] = v
-    end
+
+--- Set attributes of a document node.
+-- Will add/overwite values, but will not remove existing ones.
+-- Operates on the Node itself, will not take position into account.
+-- @tparam table t a table containing attribute/value pairs
+-- @return the current node (`self`)
+function Doc:set_attribs(t)
+  for k,v in pairs(t) do
+    self.attr[k] = v
+  end
+  return self
 end
 
---- set a single attribute of a document node.
+
+--- Set a single attribute of a document node.
+-- Operates on the Node itself, will not take position into account.
 -- @param a attribute
--- @param v its value
+-- @param v its value, pass in `nil` to delete the attribute
+-- @return the current node (`self`)
 function Doc:set_attrib(a,v)
-    self.attr[a] = v
+  self.attr[a] = v
+  return self
 end
 
---- access the attributes of a document node.
+
+--- Gets the attributes of a document node.
+-- Operates on the Node itself, will not take position into account.
+-- @return table with attributes (attribute/value pairs)
 function Doc:get_attribs()
-    return self.attr
+  return self.attr
 end
 
-local function is_text(s) return type(s) == 'string' end
 
---- function to create an element with a given tag name and a set of children.
--- @param tag a tag name
--- @param items either text or a table where the hash part is the attributes and the list part is the children.
-function _M.elem(tag,items)
-    local s = _M.new(tag)
-    if is_text(items) then items = {items} end
-    if _M.is_tag(items) then
-       t_insert(s,items)
-    elseif type(items) == 'table' then
-       for k,v in pairs(items) do
-           if is_text(k) then
-               s.attr[k] = v
-               t_insert(s.attr,k)
-           else
-               s[k] = v
-           end
-       end
-    end
-    return s
-end
 
---- given a list of names, return a number of element constructors.
--- @param list  a list of names, or a comma-separated string.
--- @usage local parent,children = doc.tags 'parent,children' <br>
---  doc = parent {child 'one', child 'two'}
-function _M.tags(list)
-    local ctors = {}
-    if is_text(list) then list = split(list,'%s*,%s*') end
-    for _,tag in ipairs(list) do
-        local ctor = function(items) return _M.elem(tag,items) end
-        t_insert(ctors,ctor)
-    end
-    return unpack(ctors)
-end
+local template_cache do
+  local templ_cache = {}
 
-local templ_cache = {}
-
-local function template_cache (templ)
+  -- @param templ a template, a string being valid xml to be parsed, or a Node object
+  function template_cache(templ)
     if is_text(templ) then
-        if templ_cache[templ] then
-            templ = templ_cache[templ]
-        else
-            local str,err = templ
-            templ,err = _M.parse(str,false,true)
-            if not templ then return nil,err end
-            templ_cache[str] = templ
+      if templ_cache[templ] then
+        -- cache hit
+        return templ_cache[templ]
+
+      else
+        -- parse and cache
+        local ptempl, err = _M.parse(templ,false,true)
+        if not ptempl then
+          return nil, err
         end
-    elseif not _M.is_tag(templ) then
-        return nil, "template is not a document"
+        templ_cache[templ] = ptempl
+        return ptempl
+      end
     end
-    return templ
+
+    if _M.is_tag(templ) then
+      return templ
+    end
+
+    return nil, "template is not a document"
+  end
 end
 
-local function is_data(data)
+
+do
+  local function is_data(data)
     return #data == 0 or type(data[1]) ~= 'table'
-end
+  end
 
-local function prepare_data(data)
+
+  local function prepare_data(data)
     -- a hack for ensuring that $1 maps to first element of data, etc.
     -- Either this or could change the gsub call just below.
     for i,v in ipairs(data) do
-        data[tostring(i)] = v
+      data[tostring(i)] = v
     end
-end
+  end
 
---- create a substituted copy of a document,
--- @param templ  may be a document or a string representation which will be parsed and cached
--- @param data  a table of name-value pairs or a list of such tables
--- @return an XML document
-function Doc.subst(templ, data)
-    local err
-    if type(data) ~= 'table' or not next(data) then return nil, "data must be a non-empty table" end
+  --- create a substituted copy of a document,
+  -- @param template may be a document or a string representation which will be parsed and cached
+  -- @param data a table of name-value pairs or a list of such tables
+  -- @return an XML document
+  function Doc.subst(template, data)
+    if type(data) ~= 'table' or not next(data) then
+      return nil, "data must be a non-empty table"
+    end
+
     if is_data(data) then
-        prepare_data(data)
+      prepare_data(data)
     end
-    templ,err = template_cache(templ)
-    if err then return nil, err end
+
+    local templ, err = template_cache(template)
+    if err then
+      return nil, err
+    end
+
     local function _subst(item)
-        return _M.clone(templ,function(s)
-            return s:gsub('%$(%w+)',item)
-        end)
+      return _M.clone(templ, function(s)
+        return s:gsub('%$(%w+)', item)
+      end)
     end
-    if is_data(data) then return _subst(data) end
+
+    if is_data(data) then
+      return _subst(data)
+    end
+
     local list = {}
-    for _,item in ipairs(data) do
-        prepare_data(item)
-        t_insert(list,_subst(item))
+    for _, item in ipairs(data) do
+      prepare_data(item)
+      t_insert(list, _subst(item))
     end
+
     if data.tag then
-        list = _M.elem(data.tag,list)
+      list = _M.elem(data.tag,list)
     end
     return list
+  end
 end
 
 
---- get the first child with a given tag name.
+--- Return the first child with a given tag name (non-recursive).
 -- @param tag the tag name
+-- @return the child Node found or `nil` if not found
 function Doc:child_with_name(tag)
+  for _, child in ipairs(self) do
+    if child.tag == tag then
+      return child
+    end
+  end
+end
+
+
+do
+  -- @param self document node to traverse
+  -- @param tag tag-name to look for
+  -- @param list array table to add the matching ones to
+  -- @param recurse if truthy, recursivly search the node
+  local function _children_with_name(self, tag, list, recurse)
     for _, child in ipairs(self) do
-        if child.tag == tag then return child; end
-    end
-end
-
-local _children_with_name
-function _children_with_name(self,tag,list,recurse)
-    for _, child in ipairs(self) do if type(child) == 'table' then
-        if child.tag == tag then t_insert(list,child) end
-        if recurse then _children_with_name(child,tag,list,recurse) end
-    end end
-end
-
---- get all elements in a document that have a given tag.
--- @param tag a tag name
--- @param dont_recurse optionally only return the immediate children with this tag name
--- @return a list of elements
-function Doc:get_elements_with_name(tag,dont_recurse)
-    local res = {}
-    _children_with_name(self,tag,res,not dont_recurse)
-    return res
-end
-
--- iterate over all children of a document node, including text nodes.
-function Doc:children()
-    local i = 0;
-    return function (a)
-            i = i + 1
-            return a[i];
-    end, self, i;
-end
-
--- return the first child element of a node, if it exists.
-function Doc:first_childtag()
-    if #self == 0 then return end
-    for _,t in ipairs(self) do
-        if type(t) == 'table' then return t end
-    end
-end
-
-function Doc:matching_tags(tag, xmlns)
-    xmlns = xmlns or self.attr.xmlns;
-    local tags = self;
-    local start_i, max_i, v = 1, #tags;
-    return function ()
-            for i=start_i,max_i do
-                v = tags[i];
-                if (not tag or v.tag == tag)
-                and (not xmlns or xmlns == v.attr.xmlns) then
-                    start_i = i+1;
-                    return v;
-                end
-            end
-        end, tags, start_i;
-end
-
---- iterate over all child elements of a document node.
-function Doc:childtags()
-    local i = 0;
-    return function (a)
-        local v
-            repeat
-                i = i + 1
-                v = self[i]
-                if v and type(v) == 'table' then return v; end
-            until not v
-        end, self[1], i;
-end
-
---- visit child element  of a node and call a function, possibility modifying the document.
--- @param callback  a function passed the node (text or element). If it returns nil, that node will be removed.
--- If it returns a value, that will replace the current node.
-function Doc:maptags(callback)
-    local is_tag = _M.is_tag
-    local i = 1;
-    while i <= #self do
-        if is_tag(self[i]) then
-            local ret = callback(self[i]);
-            if ret == nil then
-                t_remove(self, i);
-            else
-                self[i] = ret;
-                i = i + 1;
-            end
-        else
-            i = i + 1
+      if type(child) == 'table' then
+        if child.tag == tag then
+          t_insert(list, child)
         end
+        if recurse then
+          _children_with_name(child, tag, list, recurse)
+        end
+      end
     end
-    return self;
+  end
+
+  --- Returns all elements in a document that have a given tag.
+  -- @tparam string tag a tag name
+  -- @tparam[opt=false] boolean dont_recurse optionally only return the immediate children with this tag name
+  -- @return a list of elements found, list will be empty if none was found.
+  function Doc:get_elements_with_name(tag, dont_recurse)
+    local res = {}
+    _children_with_name(self, tag, res, not dont_recurse)
+    return res
+  end
+end
+
+
+
+--- Iterator over all children of a document node, including text nodes.
+-- This function is not recursive, so returns only direct child nodes.
+-- @return iterator that returns a single Node per iteration.
+function Doc:children()
+  local i = 0;
+  return function (a)
+    i = i + 1
+    return a[i];
+  end, self, i;
+end
+
+
+--- Return the first child element of a node, if it exists.
+-- This will skip text nodes.
+-- @return first child Node or `nil` if there is none.
+function Doc:first_childtag()
+  if #self == 0 then
+    return
+  end
+  for _, t in ipairs(self) do
+    if type(t) == 'table' then
+      return t
+    end
+  end
+end
+
+
+--- Iterator that matches tag names, and a namespace (non-recursive).
+-- @tparam[opt=nil] string tag tag names to return. Returns all tags if not provided.
+-- @tparam[opt=nil] string xmlns the namespace value ('xmlns' attribute) to return. If not
+-- provided will match all namespaces.
+-- @return iterator that returns a single Node per iteration.
+function Doc:matching_tags(tag, xmlns)
+  -- TODO: this doesn't make sense??? namespaces are not "xmnls", as matched below
+  -- but "xmlns:name"... so should be a string-prefix match if anything...
+  xmlns = xmlns or self.attr.xmlns;
+  local tags = self
+  local next_i = 1
+  local max_i = #tags
+  local node
+  return function ()
+      for i = next_i, max_i do
+        node = tags[i];
+        if (not tag or node.tag == tag) and
+           (not xmlns or xmlns == node.attr.xmlns) then
+          next_i = i + 1
+          return node
+        end
+      end
+    end, tags, next_i
+end
+
+
+--- Iterator over all child tags of a document node. This will skip over
+-- text nodes.
+-- @return iterator that returns a single Node per iteration.
+function Doc:childtags()
+  local i = 0;
+  return function (a)
+    local v
+      repeat
+        i = i + 1
+        v = self[i]
+        if v and type(v) == 'table' then
+          return v
+        end
+      until not v
+    end, self[1], i;
+end
+
+
+--- Visit child Nodes of a node and call a function, possibly modifying the document.
+-- Text elements will be skipped.
+-- This is not recursive, so only direct children will be passed.
+-- @tparam function callback a function with signature `function(node)`, passed the node.
+-- The element will be updated with the returned value, or deleted if it returns `nil`.
+function Doc:maptags(callback)
+  local is_tag = _M.is_tag
+  local i = 1;
+
+  while i <= #self do
+    if is_tag(self[i]) then
+      local ret = callback(self[i]);
+      if ret == nil then
+        -- remove it
+        t_remove(self, i);
+
+      else
+        -- update it
+        self[i] = ret;
+        i = i + 1;
+      end
+    else
+      i = i + 1
+    end
+  end
+
+  return self;
 end
 
 local xml_escape
@@ -414,13 +589,13 @@ local function _dostring(t, buf, self, xml_escape, parentns, idn, indent, attr_i
     end
 end
 
----- pretty-print an XML document
---- @param t an XML document
---- @param idn an initial indent (indents are all strings)
---- @param indent an indent for each level
---- @param attr_indent if given, indent each attribute pair and put on a separate line
---- @param xml force prefacing with default or custom <?xml...>
---- @return a string representation
+--- Function to pretty-print an XML document.
+-- @param t an XML document
+-- @param idn an initial indent (indents are all strings)
+-- @param indent an indent for each level
+-- @param attr_indent if given, indent each attribute pair and put on a separate line
+-- @param xml force prefacing with default or custom <?xml...>
+-- @return a string representation
 function _M.tostring(t,idn,indent, attr_indent, xml)
     local buf = {};
     if xml then
@@ -430,11 +605,22 @@ function _M.tostring(t,idn,indent, attr_indent, xml)
             buf[1] = "<?xml version='1.0'?>"
         end
     end
-    _dostring(t, buf, _dostring, xml_escape, nil,idn,indent, attr_indent);
+    _dostring(t, buf, _dostring, xml_escape, nil, idn, indent, attr_indent);
     return t_concat(buf);
 end
 
 Doc.__tostring = _M.tostring
+
+--- Method to pretty-print an XML document.
+-- @param idn an initial indent (indents are all strings)
+-- @param indent an indent for each level
+-- @param attr_indent if given, indent each attribute pair and put on a separate line
+-- @param xml force prefacing with default or custom <?xml...>
+-- @return a string representation
+function Doc:tostring(idn,indent, attr_indent, xml)
+  return _M.tostring(self, idn,indent, attr_indent, xml)
+end
+
 
 --- get the full text value of an element
 function Doc:get_text()
@@ -517,7 +703,7 @@ end
 
 --- call the desired function recursively over the document.
 -- @param doc the document
--- @param depth_first  visit child notes first, then the current node
+-- @param depth_first  visit child nodes first, then the current node
 -- @param operation a function which will receive the current tag name and current node.
 function _M.walk (doc, depth_first, operation)
     if not depth_first then operation(doc.tag,doc) end
@@ -552,7 +738,7 @@ local function unescape(str) return (str:gsub( "&(%a+);", escapes)); end
 --- Parse a well-formed HTML file as a string.
 -- Tags are case-insenstive, DOCTYPE is ignored, and empty elements can be .. empty.
 -- @param s the HTML
-function _M.parsehtml (s)
+function _M.parsehtml(s)
     return _M.basic_parse(s,false,true)
 end
 
@@ -560,7 +746,7 @@ end
 -- @param s the XML document to be parsed.
 -- @param all_text  if true, preserves all whitespace. Otherwise only text containing non-whitespace is included.
 -- @param html if true, uses relaxed HTML rules for parsing
-function _M.basic_parse(s,all_text,html)
+function _M.xxx_basic_parse(s,all_text,html)
     local t_insert,t_remove = table.insert,table.remove
     local s_find,s_sub = string.find,string.sub
     local stack = {}
