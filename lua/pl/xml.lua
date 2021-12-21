@@ -30,23 +30,27 @@
 -- @module pl.xml
 
 local utils = require 'pl.utils'
-local split         =   utils.split;
-local t_insert      =  table.insert;
-local t_concat      =  table.concat;
-local t_remove      =  table.remove;
-local s_match       =  string.match;
-local tostring      =      tostring;
-local setmetatable  =  setmetatable;
-local getmetatable  =  getmetatable;
-local pairs         =         pairs;
-local ipairs        =        ipairs;
-local type          =          type;
-local next          =          next;
-local print         =         print;
-local unpack        =  utils.unpack;
-local s_gsub        =   string.gsub;
-local s_find        =   string.find;
-local pcall,require,io     =   pcall,require,io
+local split         =   utils.split
+local t_insert      =  table.insert
+local t_concat      =  table.concat
+local t_remove      =  table.remove
+local s_match       =  string.match
+local tostring      =      tostring
+local setmetatable  =  setmetatable
+local getmetatable  =  getmetatable
+local pairs         =         pairs
+local ipairs        =        ipairs
+local type          =          type
+local next          =          next
+local print         =         print
+local unpack        =  utils.unpack
+local s_gsub        =   string.gsub
+local s_sub         =    string.sub
+local s_find        =   string.find
+local pcall         =         pcall
+local require       =       require
+local io            =            io
+
 
 local _M = {}
 local Doc = { __type = "doc" };
@@ -54,6 +58,8 @@ Doc.__index = Doc;
 
 
 local function is_text(s) return type(s) == 'string' end
+local function is_tag(d) return type(d) == 'table' and is_text(d.tag) end
+
 
 
 --- create a new document node.
@@ -68,7 +74,12 @@ function _M.new(tag, attr)
   if type(tag) ~= "string" then
     error("expected 'tag' to be a string value, got: " .. type(tag), 2)
   end
-  local doc = { tag = tag, attr = attr or {}, last_add = {}};
+  attr = attr or {}
+  if type(attr) ~= "table" then
+    error("expected 'attr' to be a table value, got: " .. type(attr), 2)
+  end
+
+  local doc = { tag = tag, attr = attr, last_add = {}};
   return setmetatable(doc, Doc);
 end
 
@@ -139,7 +150,7 @@ end
 function _M.elem(tag, items)
   local s = _M.new(tag)
   if is_text(items) then items = {items} end
-  if _M.is_tag(items) then
+  if is_tag(items) then
     t_insert(s,items)
   elseif type(items) == 'table' then
     for k,v in pairs(items) do
@@ -277,6 +288,7 @@ end
 -- @tparam table t a table containing attribute/value pairs
 -- @return the current node (`self`)
 function Doc:set_attribs(t)
+  -- TODO: keep array part in sync
   for k,v in pairs(t) do
     self.attr[k] = v
   end
@@ -290,6 +302,7 @@ end
 -- @param v its value, pass in `nil` to delete the attribute
 -- @return the current node (`self`)
 function Doc:set_attrib(a,v)
+  -- TODO: keep array part in sync
   self.attr[a] = v
   return self
 end
@@ -325,7 +338,7 @@ local template_cache do
       end
     end
 
-    if _M.is_tag(templ) then
+    if is_tag(templ) then
       return templ
     end
 
@@ -408,6 +421,7 @@ do
   -- @param list array table to add the matching ones to
   -- @param recurse if truthy, recursivly search the node
   local function _children_with_name(self, tag, list, recurse)
+    -- TODO: protect against recursion
     for _, child in ipairs(self) do
       if type(child) == 'table' then
         if child.tag == tag then
@@ -453,7 +467,7 @@ function Doc:first_childtag()
     return
   end
   for _, t in ipairs(self) do
-    if type(t) == 'table' then
+    if is_tag(t) then
       return t
     end
   end
@@ -510,7 +524,6 @@ end
 -- @tparam function callback a function with signature `function(node)`, passed the node.
 -- The element will be updated with the returned value, or deleted if it returns `nil`.
 function Doc:maptags(callback)
-  local is_tag = _M.is_tag
   local i = 1;
 
   while i <= #self do
@@ -533,187 +546,346 @@ function Doc:maptags(callback)
   return self;
 end
 
-local xml_escape
+
 do
-    local escape_table = { ["'"] = "&apos;", ["\""] = "&quot;", ["<"] = "&lt;", [">"] = "&gt;", ["&"] = "&amp;" };
-    function xml_escape(str) return (s_gsub(str, "['&<>\"]", escape_table)); end
-    _M.xml_escape = xml_escape;
+  local escape_table = {
+    ["'"] = "&apos;",
+    ['"'] = "&quot;",
+    ["<"] = "&lt;",
+    [">"] = "&gt;",
+    ["&"] = "&amp;",
+  }
+
+  --- Escapes a string for safe use in xml.
+  -- Handles quotes(single+double), less-than, greater-than, and ampersand.
+  -- @tparam string str string value to escape
+  -- @return escaped string
+  -- @usage
+  -- local esc = xml.xml_escape([["'<>&]])  --> "&quot;&apos;&lt;&gt;&amp;"
+  function _M.xml_escape(str)
+    return (s_gsub(str, "['&<>\"]", escape_table))
+  end
 end
+local xml_escape = _M.xml_escape
+
+do
+  local escape_table = {
+    quot = '"',
+    apos = "'",
+    lt = "<",
+    gt = ">",
+    amp = "&",
+  }
+
+  --- Unescapes a string from xml.
+  -- Handles quotes(single+double), less-than, greater-than, and ampersand.
+  -- @tparam string str string value to unescape
+  -- @return unescaped string
+  -- @usage
+  -- local unesc = xml.xml_escape("&quot;&apos;&lt;&gt;&amp;")  --> [["'<>&]]
+  function _M.xml_unescape(str)
+    return (str:gsub( "&(%a+);", escape_table))
+  end
+end
+local xml_unescape = _M.xml_unescape
 
 -- pretty printing
 -- if indent, then put each new tag on its own line
 -- if attr_indent, put each new attribute on its own line
-local function _dostring(t, buf, self, xml_escape, parentns, idn, indent, attr_indent)
-    local nsid = 0;
-    local tag = t.tag
-    local lf,alf = ""," "
-    if indent then lf = '\n'..idn end
-    if attr_indent then alf = '\n'..idn..attr_indent end
-    t_insert(buf, lf.."<"..tag);
-    local function write_attr(k,v)
-        if s_find(k, "\1", 1, true) then
-            local ns, attrk = s_match(k, "^([^\1]*)\1?(.*)$");
-            nsid = nsid + 1;
-            t_insert(buf, " xmlns:ns"..nsid.."='"..xml_escape(ns).."' ".."ns"..nsid..":"..attrk.."='"..xml_escape(v).."'");
-        elseif not(k == "xmlns" and v == parentns) then
-            t_insert(buf, alf..k.."='"..xml_escape(v).."'");
-        end
+local function _dostring(t, buf, parentns, block_indent, tag_indent, attr_indent)
+  local nsid = 0
+  local tag = t.tag
+
+  local lf = ""
+  if tag_indent then
+    lf = '\n'..block_indent
+  end
+
+  local alf = " "
+  if attr_indent then
+    alf = '\n'..block_indent..attr_indent
+  end
+
+  t_insert(buf, lf.."<"..tag)
+
+  local function write_attr(k,v)
+    if s_find(k, "\1", 1, true) then
+      nsid = nsid + 1
+      local ns, attrk = s_match(k, "^([^\1]*)\1?(.*)$")
+      t_insert(buf, " xmlns:ns"..nsid.."='"..xml_escape(ns).."' ".."ns"..nsid..":"..attrk.."='"..xml_escape(v).."'")
+
+    elseif not (k == "xmlns" and v == parentns) then
+      t_insert(buf, alf..k.."='"..xml_escape(v).."'");
     end
-    -- it's useful for testing to have predictable attribute ordering, if available
-    if #t.attr > 0 then
-        for _,k in ipairs(t.attr) do
-            write_attr(k,t.attr[k])
-        end
-    else
-        for k, v in pairs(t.attr) do
-            write_attr(k,v)
-        end
+  end
+
+  -- it's useful for testing to have predictable attribute ordering, if available
+  if #t.attr > 0 then
+    -- TODO: the key-value list is leading, what if they are not in-sync
+    for _,k in ipairs(t.attr) do
+      write_attr(k,t.attr[k])
     end
-    local len,has_children = #t;
-    if len == 0 then
-    local out = "/>"
-    if attr_indent then out = '\n'..idn..out end
-        t_insert(buf, out);
-    else
-        t_insert(buf, ">");
-        for n=1,len do
-            local child = t[n];
-            if child.tag then
-                self(child, buf, self, xml_escape, t.attr.xmlns,idn and idn..indent, indent, attr_indent );
-                has_children = true
-            else -- text element
-                t_insert(buf, xml_escape(child));
-            end
-        end
-        t_insert(buf, (has_children and lf or '').."</"..tag..">");
+  else
+    for k, v in pairs(t.attr) do
+      write_attr(k,v)
     end
+  end
+
+  local len = #t
+  local has_children
+
+  if len == 0 then
+    t_insert(buf, attr_indent and '\n'..block_indent.."/>" or "/>")
+
+  else
+    t_insert(buf, ">");
+
+    for n = 1, len do
+      local child = t[n]
+
+      if child.tag then
+        has_children = true
+        _dostring(child, buf, xml_escape, t.attr.xmlns,
+                  block_indent and block_indent..tag_indent, tag_indent, attr_indent)
+
+      else
+        -- text element
+        t_insert(buf, xml_escape(child))
+      end
+    end
+
+    t_insert(buf, (has_children and lf or '').."</"..tag..">");
+  end
 end
 
 --- Function to pretty-print an XML document.
--- @param t an XML document
--- @param idn an initial indent (indents are all strings)
--- @param indent an indent for each level
--- @param attr_indent if given, indent each attribute pair and put on a separate line
--- @param xml force prefacing with default or custom <?xml...>
+-- @param doc an XML document
+-- @tparam[opt] string|int b_ind an initial indent (required when `t_ind` is set)
+-- @tparam[opt] string|int t_ind an indent for each level (required when `a_ind` is set)
+-- @tparam[opt] string|int a_ind if given, indent each attribute pair and put on a separate line
+-- @tparam[opt="&lt;?xml version='1.0'?&gt;"] string xml_preface force prefacing with default or custom <?xml...>
 -- @return a string representation
-function _M.tostring(t,idn,indent, attr_indent, xml)
-    local buf = {};
-    if xml then
-        if type(xml) == "string" then
-            buf[1] = xml
-        else
-            buf[1] = "<?xml version='1.0'?>"
-        end
+-- @see Doc:tostring
+function _M.tostring(doc, b_ind, t_ind, a_ind, xml_preface)
+  local buf = {}
+
+  if type(b_ind) == "number" then b_ind = (" "):rep(b_ind) end
+  if type(t_ind) == "number" then t_ind = (" "):rep(t_ind) end
+  if type(a_ind) == "number" then a_ind = (" "):rep(a_ind) end
+
+  if xml_preface then
+    if type(xml_preface) == "string" then
+      buf[1] = xml_preface
+    else
+      buf[1] = "<?xml version='1.0'?>"
     end
-    _dostring(t, buf, _dostring, xml_escape, nil, idn, indent, attr_indent);
-    return t_concat(buf);
+  end
+
+  _dostring(doc, buf, nil, b_ind, t_ind, a_ind, xml_preface)
+
+  return t_concat(buf)
 end
+
 
 Doc.__tostring = _M.tostring
 
+
 --- Method to pretty-print an XML document.
--- @param idn an initial indent (indents are all strings)
--- @param indent an indent for each level
--- @param attr_indent if given, indent each attribute pair and put on a separate line
--- @param xml force prefacing with default or custom <?xml...>
+-- Invokes `xml.tostring`.
+-- @tparam[opt] string|int b_ind an initial indent (required when `t_ind` is set)
+-- @tparam[opt] string|int t_ind an indent for each level (required when `a_ind` is set)
+-- @tparam[opt] string|int a_ind if given, indent each attribute pair and put on a separate line
+-- @tparam[opt="&lt;?xml version='1.0'?&gt;"] string xml_preface force prefacing with default or custom <?xml...>
 -- @return a string representation
-function Doc:tostring(idn,indent, attr_indent, xml)
-  return _M.tostring(self, idn,indent, attr_indent, xml)
+-- @see xml.tostring
+function Doc:tostring(b_ind, t_ind, a_ind, xml_preface)
+  return _M.tostring(self, b_ind, t_ind, a_ind, xml_preface)
 end
 
 
---- get the full text value of an element
+--- get the full text value of an element.
+-- @return a single string with all text elements concatenated
+-- @usage
+-- local doc = xml.new("main")
+-- doc:text("one")
+-- doc:add_child(xml.elem "two")
+-- doc:text("three")
+--
+-- local t = doc:get_text()    -->  "onethree"
 function Doc:get_text()
-    local res = {}
-    for i,el in ipairs(self) do
-        if is_text(el) then t_insert(res,el) end
-    end
-    return t_concat(res);
+  local res = {}
+  for i,el in ipairs(self) do
+    if is_text(el) then t_insert(res,el) end
+  end
+  return t_concat(res);
 end
 
---- make a copy of a document
--- @param doc the original document
--- @param strsubst an optional function for handling string copying which could do substitution, etc.
-function _M.clone(doc, strsubst)
-    local lookup_table = {};
-    local function _copy(object,kind,parent)
-        if type(object) ~= "table" then
-            if strsubst and is_text(object) then return strsubst(object,kind,parent)
-            else return object
-            end
-        elseif lookup_table[object] then
-            return lookup_table[object]
-        end
-        local new_table = {};
-        lookup_table[object] = new_table
-        local tag = object.tag
-        new_table.tag = _copy(tag,'*TAG',parent)
-        if object.attr then
-            local res = {}
-            for attr,value in pairs(object.attr) do
-                res[attr] = _copy(value,attr,object)
-            end
-            new_table.attr = res
-        end
-        for index = 1,#object do
-            local v = _copy(object[index],'*TEXT',object)
-            t_insert(new_table,v)
-        end
-        return setmetatable(new_table, getmetatable(object))
+
+do
+  local function _copy(object, kind, parent, strsubst, lookup_table)
+    if type(object) ~= "table" then
+      if strsubst and is_text(object) then
+        return strsubst(object, kind, parent)
+      else
+        return object
+      end
     end
 
-    return _copy(doc)
+    if lookup_table[object] then
+      error("recursion detected")
+    end
+    lookup_table[object] = true
+
+    local new_table = {}
+    lookup_table[object] = new_table
+
+    local tag = object.tag
+    new_table.tag = _copy(tag, '*TAG', parent, strsubst, lookup_table)
+
+    if object.attr then
+      local res = {}
+      for attr, value in pairs(object.attr) do
+        if type(attr) == "string" then
+          res[attr] = _copy(value, attr, object, strsubst, lookup_table)
+        end
+      end
+      new_table.attr = res
+    end
+
+    for index = 1, #object do
+      local v = _copy(object[index], '*TEXT', object, strsubst, lookup_table)
+      t_insert(new_table,v)
+    end
+
+    return setmetatable(new_table, getmetatable(object))
+  end
+
+  --- Returns a copy of a document.
+  -- The `strsubst` parameter is a callback with signature `function(object, kind, parent)`.
+  --
+  -- Param `kind` has the following values, and parameters:
+  --
+  -- - `"*TAG"`: `object` is the tag-name, `parent` is the Node object. Returns the new tag name.
+  --
+  -- - `"*TEXT"`: `object` is the text-element, `parent` is the Node object. Returns the new text value.
+  --
+  -- - other strings not prefixed with `*`: `kind` is the attribute name, `object` is the
+  --   attribute value, `parent` is the Node object. Returns the new attribute value.
+  --
+  -- @tparam Node|string doc a Node object or string (text node)
+  -- @tparam[opt] function strsubst an optional function for handling string copying
+  -- which could do substitution, etc.
+  -- @return copy of the document
+  -- @see Doc:filter
+  function _M.clone(doc, strsubst)
+    return _copy(doc, nil, nil, strsubst, {})
+  end
 end
 
+
+--- Returns a copy of a document.
+-- This is the method version of `xml.clone`.
+-- @see xml.clone
+-- @name Doc:filter
+-- @tparam[opt] function strsubst an optional function for handling string copying
 Doc.filter = _M.clone -- also available as method
 
---- compare two documents.
--- @param t1 any value
--- @param t2 any value
-function _M.compare(t1,t2)
+do
+  local function _compare(t1, t2, recurse_check)
+
     local ty1 = type(t1)
     local ty2 = type(t2)
-    if ty1 ~= ty2 then return false, 'type mismatch' end
-    if ty1 == 'string' then
-        return t1 == t2 and true or 'text '..t1..' ~= text '..t2
+
+    if ty1 ~= ty2 then
+      return false, 'type mismatch'
     end
-    if ty1 ~= 'table' or ty2 ~= 'table' then return false, 'not a document' end
-    if t1.tag ~= t2.tag then return false, 'tag  '..t1.tag..' ~= tag '..t2.tag end
-    if #t1 ~= #t2 then return false, 'size '..#t1..' ~= size '..#t2..' for tag '..t1.tag end
+
+    if ty1 == 'string' then
+      if t1 == t2 then
+        return true
+      else
+        return false, 'text '..t1..' ~= text '..t2
+      end
+    end
+
+    if ty1 ~= 'table' or ty2 ~= 'table' then
+      return false, 'not a document'
+    end
+
+    if recurse_check[t1] then
+      return false, "recursive document"
+    end
+    recurse_check[t1] = true
+
+    if t1.tag ~= t2.tag then
+      return false, 'tag  '..t1.tag..' ~= tag '..t2.tag
+    end
+
+    if #t1 ~= #t2 then
+      return false, 'size '..#t1..' ~= size '..#t2..' for tag '..t1.tag
+    end
+
     -- compare attributes
     for k,v in pairs(t1.attr) do
-        if t2.attr[k] ~= v then return false, 'mismatch attrib' end
+      if t2.attr[k] ~= v then return false, 'mismatch attrib' end
     end
     for k,v in pairs(t2.attr) do
-        if t1.attr[k] ~= v then return false, 'mismatch attrib' end
+      if t1.attr[k] ~= v then return false, 'mismatch attrib' end
     end
+
     -- compare children
-    for i = 1,#t1 do
-        local yes,err = _M.compare(t1[i],t2[i])
-        if not yes then return err end
+    for i = 1, #t1 do
+      local ok, err = _compare(t1[i], t2[i], recurse_check)
+      if not ok then
+        return ok, err
+      end
     end
     return true
+  end
+
+  --- Compare two documents or elements.
+  -- Equality is based on tag, child nodes (text and tags), attributes and order
+  -- of those.
+  -- @tparam Node|string t1 a Node object or string (text node)
+  -- @tparam Node|string t2 a Node object or string (text node)
+  -- @treturn boolean `true` when the Nodes are equal.
+  function _M.compare(t1,t2)
+    return _compare(t1, t2, {})
+  end
 end
+
 
 --- is this value a document element?
 -- @param d any value
-function _M.is_tag(d)
-    return type(d) == 'table' and is_text(d.tag)
+-- @treturn boolean `true` if it is a `table` with property `tag` being a string value.
+-- @name is_tag
+_M.is_tag = is_tag
+
+
+do
+  local function _walk(doc, depth_first, operation, recurse_check)
+    if not depth_first then operation(doc.tag, doc) end
+    for _,d in ipairs(doc) do
+      if is_tag(d) then
+        assert(not recurse_check[d], "recursion detected")
+        recurse_check[d] = true
+        _walk(d, depth_first, operation, recurse_check)
+      end
+    end
+    if depth_first then operation(doc.tag, doc) end
+  end
+
+  --- Calls a function recursively over Nodes in the document.
+  -- Will only call on tags, it will skip text nodes.
+  -- The function signature for `operation` is `function(tag_name, Node)`.
+  -- @tparam Node|string doc a Node object or string (text node)
+  -- @tparam boolean depth_first visit child nodes first, then the current node
+  -- @tparam function operation a function which will receive the current tag name and current node.
+  function _M.walk(doc, depth_first, operation)
+    return _walk(doc, depth_first, operation, {})
+  end
 end
 
---- call the desired function recursively over the document.
--- @param doc the document
--- @param depth_first  visit child nodes first, then the current node
--- @param operation a function which will receive the current tag name and current node.
-function _M.walk (doc, depth_first, operation)
-    if not depth_first then operation(doc.tag,doc) end
-    for _,d in ipairs(doc) do
-        if _M.is_tag(d) then
-            _M.walk(d,depth_first,operation)
-        end
-    end
-    if depth_first then operation(doc.tag,doc) end
-end
 
 local html_empty_elements = { --lists all HTML empty (void) elements
     br      = true,
@@ -732,9 +904,6 @@ local html_empty_elements = { --lists all HTML empty (void) elements
     embed = true,
 }
 
-local escapes = { quot = "\"", apos = "'", lt = "<", gt = ">", amp = "&" }
-local function unescape(str) return (str:gsub( "&(%a+);", escapes)); end
-
 --- Parse a well-formed HTML file as a string.
 -- Tags are case-insenstive, DOCTYPE is ignored, and empty elements can be .. empty.
 -- @param s the HTML
@@ -746,9 +915,7 @@ end
 -- @param s the XML document to be parsed.
 -- @param all_text  if true, preserves all whitespace. Otherwise only text containing non-whitespace is included.
 -- @param html if true, uses relaxed HTML rules for parsing
-function _M.xxx_basic_parse(s,all_text,html)
-    local t_insert,t_remove = table.insert,table.remove
-    local s_find,s_sub = string.find,string.sub
+function _M.basic_parse(s, all_text, html)
     local stack = {}
     local top = {}
 
@@ -756,12 +923,12 @@ function _M.xxx_basic_parse(s,all_text,html)
       local arg = {}
       s:gsub("([%w:%-_]+)%s*=%s*([\"'])(.-)%2", function (w, _, a)
         if html then w = w:lower() end
-        arg[w] = unescape(a)
+        arg[w] = xml_unescape(a)
       end)
       if html then
         s:gsub("([%w:%-_]+)%s*=%s*([^\"']+)%s*", function (w, a)
           w = w:lower()
-          arg[w] = unescape(a)
+          arg[w] = xml_unescape(a)
         end)
       end
       return arg
@@ -796,7 +963,7 @@ function _M.xxx_basic_parse(s,all_text,html)
                 if html_empty_elements[label] then empty = "/" end
             end
             if all_text or not s_find(text, "^%s*$") then
-                t_insert(top, unescape(text))
+                t_insert(top, xml_unescape(text))
             end
             if empty == "/" then  -- empty element tag
                 t_insert(top, setmetatable({tag=label, attr=parseargs(xarg), empty=1},Doc))
@@ -819,7 +986,7 @@ function _M.xxx_basic_parse(s,all_text,html)
     end
     local text = s_sub(s, i)
     if all_text or  not s_find(text, "^%s*$") then
-        t_insert(stack[#stack], unescape(text))
+        t_insert(stack[#stack], xml_unescape(text))
     end
     if #stack > 1 then
         error("unclosed "..stack[#stack].tag)
@@ -828,145 +995,151 @@ function _M.xxx_basic_parse(s,all_text,html)
     return is_text(res[1]) and res[2] or res[1]
 end
 
-local function empty(attr) return not attr or not next(attr) end
-local function is_element(d) return type(d) == 'table' and d.tag ~= nil end
+do
+  local match do
 
--- returns the key,value pair from a table if it has exactly one entry
-local function has_one_element(t)
-    local key,value = next(t)
-    if next(t,key) ~= nil then return false end
-    return key,value
-end
+    local function empty(attr) return not attr or not next(attr) end
 
-local function append_capture(res,tbl)
-    if not empty(tbl) then -- no point in capturing empty tables...
-        local key
-        if tbl._ then  -- if $_ was set then it is meant as the top-level key for the captured table
-            key = tbl._
-            tbl._ = nil
-            if empty(tbl) then return end
-        end
-        -- a table with only one pair {[0]=value} shall be reduced to that value
-        local numkey,val = has_one_element(tbl)
-        if numkey == 0 then tbl = val end
-        if key then
-            res[key] = tbl
-        else -- otherwise, we append the captured table
-            t_insert(res,tbl)
-        end
+    local append_capture do
+      -- returns the key,value pair from a table if it has exactly one entry
+      local function has_one_element(t)
+          local key,value = next(t)
+          if next(t,key) ~= nil then return false end
+          return key,value
+      end
+
+      function append_capture(res,tbl)
+          if not empty(tbl) then -- no point in capturing empty tables...
+              local key
+              if tbl._ then  -- if $_ was set then it is meant as the top-level key for the captured table
+                  key = tbl._
+                  tbl._ = nil
+                  if empty(tbl) then return end
+              end
+              -- a table with only one pair {[0]=value} shall be reduced to that value
+              local numkey,val = has_one_element(tbl)
+              if numkey == 0 then tbl = val end
+              if key then
+                  res[key] = tbl
+              else -- otherwise, we append the captured table
+                  t_insert(res,tbl)
+              end
+          end
+      end
     end
-end
 
-local function make_number(pat)
-    if pat:find '^%d+$' then -- $1 etc means use this as an array location
-        pat = tonumber(pat)
+    local function make_number(pat)
+        if pat:find '^%d+$' then -- $1 etc means use this as an array location
+            pat = tonumber(pat)
+        end
+        return pat
     end
-    return pat
-end
 
-local function capture_attrib(res,pat,value)
-    pat = make_number(pat:sub(2))
-    res[pat] = value
-    return true
-end
+    local function capture_attrib(res,pat,value)
+        pat = make_number(pat:sub(2))
+        res[pat] = value
+        return true
+    end
 
-local match
-function match(d,pat,res,keep_going)
-    local ret = true
-    if d == nil then d = '' end --return false end
-    -- attribute string matching is straight equality, except if the pattern is a $ capture,
-    -- which always succeeds.
-    if is_text(d) then
-        if not is_text(pat) then return false end
-        if _M.debug then print(d,pat) end
-        if pat:find '^%$' then
-            return capture_attrib(res,pat,d)
-        else
-            return d == pat
-        end
-    else
-    if _M.debug then print(d.tag,pat.tag) end
-        -- this is an element node. For a match to succeed, the attributes must
-        -- match as well.
-        -- a tagname in the pattern ending with '-' is a wildcard and matches like an attribute
-        local tagpat = pat.tag:match '^(.-)%-$'
-        if tagpat then
-            tagpat = make_number(tagpat)
-            res[tagpat] = d.tag
-        end
-        if d.tag == pat.tag or tagpat then
-
-            if not empty(pat.attr) then
-                if empty(d.attr) then ret =  false
-                else
-                    for prop,pval in pairs(pat.attr) do
-                        local dval = d.attr[prop]
-                        if not match(dval,pval,res) then ret = false;  break end
-                    end
-                end
+    function match(d,pat,res,keep_going)
+        local ret = true
+        if d == nil then d = '' end --return false end
+        -- attribute string matching is straight equality, except if the pattern is a $ capture,
+        -- which always succeeds.
+        if is_text(d) then
+            if not is_text(pat) then return false end
+            if _M.debug then print(d,pat) end
+            if pat:find '^%$' then
+                return capture_attrib(res,pat,d)
+            else
+                return d == pat
             end
-            -- the pattern may have child nodes. We match partially, so that {P1,P2} shall match {X,P1,X,X,P2,..}
-            if ret and #pat > 0 then
-                local i,j = 1,1
-                local function next_elem()
-                    j = j + 1  -- next child element of data
-                    if is_text(d[j]) then j = j + 1 end
-                    return j <= #d
-                end
-                repeat
-                    local p = pat[i]
-                    -- repeated {{<...>}} patterns  shall match one or more elements
-                    -- so e.g. {P+} will match {X,X,P,P,X,P,X,X,X}
-                    if is_element(p) and p.repeated then
-                        local found
-                        repeat
-                            local tbl = {}
-                            ret = match(d[j],p,tbl,false)
-                            if ret then
-                                found = false --true
-                                append_capture(res,tbl)
-                            end
-                        until not next_elem() or (found and not ret)
-                        i = i + 1
+        else
+        if _M.debug then print(d.tag,pat.tag) end
+            -- this is an element node. For a match to succeed, the attributes must
+            -- match as well.
+            -- a tagname in the pattern ending with '-' is a wildcard and matches like an attribute
+            local tagpat = pat.tag:match '^(.-)%-$'
+            if tagpat then
+                tagpat = make_number(tagpat)
+                res[tagpat] = d.tag
+            end
+            if d.tag == pat.tag or tagpat then
+
+                if not empty(pat.attr) then
+                    if empty(d.attr) then ret =  false
                     else
-                        ret = match(d[j],p,res,false)
-                        if ret then i = i + 1 end
+                        for prop,pval in pairs(pat.attr) do
+                            local dval = d.attr[prop]
+                            if not match(dval,pval,res) then ret = false;  break end
+                        end
                     end
-                until not next_elem() or i > #pat -- run out of elements or patterns to match
-                -- if every element in our pattern matched ok, then it's been a successful match
-                if i > #pat then return true end
+                end
+                -- the pattern may have child nodes. We match partially, so that {P1,P2} shall match {X,P1,X,X,P2,..}
+                if ret and #pat > 0 then
+                    local i,j = 1,1
+                    local function next_elem()
+                        j = j + 1  -- next child element of data
+                        if is_text(d[j]) then j = j + 1 end
+                        return j <= #d
+                    end
+                    repeat
+                        local p = pat[i]
+                        -- repeated {{<...>}} patterns  shall match one or more elements
+                        -- so e.g. {P+} will match {X,X,P,P,X,P,X,X,X}
+                        if is_tag(p) and p.repeated then
+                            local found
+                            repeat
+                                local tbl = {}
+                                ret = match(d[j],p,tbl,false)
+                                if ret then
+                                    found = false --true
+                                    append_capture(res,tbl)
+                                end
+                            until not next_elem() or (found and not ret)
+                            i = i + 1
+                        else
+                            ret = match(d[j],p,res,false)
+                            if ret then i = i + 1 end
+                        end
+                    until not next_elem() or i > #pat -- run out of elements or patterns to match
+                    -- if every element in our pattern matched ok, then it's been a successful match
+                    if i > #pat then return true end
+                end
+                if ret then return true end
+            else
+                ret = false
             end
-            if ret then return true end
-        else
-            ret = false
-        end
-        -- keep going anyway - look at the children!
-        if keep_going then
-            for child in d:childtags() do
-                ret = match(child,pat,res,keep_going)
-                if ret then break end
+            -- keep going anyway - look at the children!
+            if keep_going then
+                for child in d:childtags() do
+                    ret = match(child,pat,res,keep_going)
+                    if ret then break end
+                end
             end
         end
+        return ret
     end
-    return ret
-end
+  end
 
-function Doc:match(pat)
-    local err
-    pat,err = template_cache(pat)
-    if not pat then return nil, err end
-    _M.walk(pat,false,function(_,d)
-        if is_text(d[1]) and is_element(d[2]) and is_text(d[3]) and
-           d[1]:find '%s*{{' and d[3]:find '}}%s*' then
-           t_remove(d,1)
-           t_remove(d,2)
-           d[1].repeated = true
-        end
-    end)
+  --- does something...
+  function Doc:match(pat)
+      local err
+      pat,err = template_cache(pat)
+      if not pat then return nil, err end
+      _M.walk(pat,false,function(_,d)
+          if is_text(d[1]) and is_tag(d[2]) and is_text(d[3]) and
+            d[1]:find '%s*{{' and d[3]:find '}}%s*' then
+            t_remove(d,1)
+            t_remove(d,2)
+            d[1].repeated = true
+          end
+      end)
 
-    local res = {}
-    local ret = match(self,pat,res,true)
-    return res,ret
+      local res = {}
+      local ret = match(self,pat,res,true)
+      return res,ret
+  end
 end
 
 
